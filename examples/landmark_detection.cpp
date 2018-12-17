@@ -277,7 +277,12 @@ public:
 	 * @param[in] cell_size Width of one HoG cell in pixels.
 	 * @param[in] num_bins Number of orientations of a HoG cell. 方向划分个数
 	 *///3 /*numCells*/, 12 /*cellSize*/, 4 /*numBins*/
-	HogTransform(vector<std::string> imageFiles, VlHogVariant vlhog_variant, int num_cells, int cell_size, int num_bins) : imageFiles(imageFiles), vlhog_variant(vlhog_variant), num_cells(num_cells), cell_size(cell_size), num_bins(num_bins)
+	HogTransform(vector<std::string> imageFiles, int nType ,VlHogVariant vlhog_variant, int num_cells, int cell_size, int num_bins) :  imageFiles(imageFiles), nType(nType),vlhog_variant(vlhog_variant), num_cells(num_cells), cell_size(cell_size), num_bins(num_bins)
+	{
+	};
+
+
+	HogTransform(Mat images, int nType ,VlHogVariant vlhog_variant, int num_cells, int cell_size, int num_bins) : images(images),nType(nType),  vlhog_variant(vlhog_variant), num_cells(num_cells), cell_size(cell_size), num_bins(num_bins)
 	{
 	};
 
@@ -298,8 +303,16 @@ public:
 	{
 		assert(parameters.rows == 1);
 		using cv::Mat;
-			
-		Mat image = cv::imread(imageFiles[training_index]);	
+
+		Mat image;
+		if (nType == 1)
+		{
+			image = cv::imread(imageFiles[training_index]);	
+		}
+		else
+		{
+			image = images;
+		}
 		Mat gray_image;
 		if (image.channels() == 3) {//转换为灰度图像
 			cv::cvtColor(image, gray_image, cv::COLOR_BGR2GRAY);
@@ -365,10 +378,12 @@ public:
 
 private:
 	vector<std::string> imageFiles;
+	Mat images;
 	VlHogVariant vlhog_variant;
 	int num_cells;
 	int cell_size;
 	int num_bins;
+	int nType;
 };
 
 /**
@@ -461,16 +476,6 @@ void draw_landmarks(cv::Mat image, cv::Mat landmarks, cv::Scalar color = cv::Sca
 }
 
 
-Mat GetMeanShape(const Mat& shapes,const vector<cv::Rect>& bounding_box){
-    Mat mean(1, 2 * 68, CV_32FC1);
-    for(int i = 0;i < bounding_box.size();i++){
-        mean = mean + ProjectShape(shapes.row(i),bounding_box[i]);
-    }
-    mean = 1.0 / bounding_box.size() * mean;
-
-    return mean;
-}
-
 Mat ProjectShape(const Mat& landmark, cv::Rect& bounding_box){
 	double centroid_x = bounding_box.x + bounding_box.width/2.0;
     double centroid_y = bounding_box.y + bounding_box.height/2.0; 
@@ -498,6 +503,19 @@ Mat ReProjectShape(const Mat& landmark, cv::Rect& bounding_box){
 
     return aligned_mean; 
 }
+
+
+Mat GetMeanShape(const Mat& shapes, vector<cv::Rect>& bounding_box){
+    Mat mean(1, 2 * 68, CV_32FC1);
+    for(int i = 0;i < bounding_box.size();i++){
+        mean = mean + ProjectShape(shapes.row(i),bounding_box[i]);
+    }
+    mean = 1.0 / bounding_box.size() * mean;
+
+    return mean;
+}
+
+
 
 
 /**
@@ -573,7 +591,7 @@ int main(int argc, char *argv[])
 	Mat x0;
 	for (size_t i = 0; i < training_images.size(); ++i) {
 
-		x0.push_back(ReProjectShape(model_mean, cv::Rect(boxList[i])));
+		x0.push_back(ReProjectShape(model_mean,boxList[i]));
 		
 	}
 
@@ -588,7 +606,7 @@ int main(int argc, char *argv[])
 	regressors.emplace_back(LinearRegressor<>(Regulariser(Regulariser::RegularisationType::MatrixNorm, 0.1f, true)));
 	SupervisedDescentOptimiser<LinearRegressor<>> supervised_descent_model(regressors);
 	
-	HogTransform hog(training_images, VlHogVariant::VlHogVariantUoctti, 3 /*numCells*/, 12 /*cellSize*/, 4 /*numBins*/);
+	HogTransform hog(training_images,1, VlHogVariant::VlHogVariantUoctti, 3 /*numCells*/, 12 /*cellSize*/, 4 /*numBins*/);
 
 	// Train the model. We'll also specify an optional callback function:
 	cout << "Training the model, printing the residual after each learned regressor: " << endl;
@@ -611,10 +629,14 @@ int main(int argc, char *argv[])
 	vector<cv::Rect> detected_faces;
 	face_cascade.detectMultiScale(image, detected_faces, 1.2, 2, 0, cv::Size(50, 50));
 	Mat initial_alignment = align_mean(model_mean, cv::Rect(detected_faces[0]));
-	Mat prediction = supervised_descent_model.predict(initial_alignment, Mat(), HogTransform({ training_images[1] }, VlHogVariant::VlHogVariantUoctti, 3, 12, 4));
+	Mat prediction = supervised_descent_model.predict(initial_alignment, Mat(), HogTransform({ training_images[1] }, 1, VlHogVariant::VlHogVariantUoctti, 3, 12, 4));
 	draw_landmarks(image, prediction, { 0, 0, 255 });
 	cv::imwrite("out.png", image);
 	cout << "Ran the trained model on an image and saved the result to out.png." << endl;
+	// Save the learned model:
+	std::ofstream learned_model_file("landmark_regressor_ibug_5lms.bin", std::ios::binary);
+	cereal::BinaryOutputArchive output_archive(learned_model_file);
+	output_archive(supervised_descent_model);
 
 	
     cv::VideoCapture mCamera(0);
@@ -623,9 +645,6 @@ int main(int argc, char *argv[])
         system("pause");
         return 0;
     }
-    cv::Mat image;
-    cv::Mat current_shape;
-
     for(;;){
         mCamera >> image;
 	    vector<cv::Rect> detected_faces;
@@ -636,7 +655,7 @@ int main(int argc, char *argv[])
         }
        
 	    Mat initial_alignment = align_mean(model_mean, cv::Rect(detected_faces[0]));
-	    Mat prediction = supervised_descent_model.predict(initial_alignment, Mat(), HogTransform({ image }, VlHogVariant::VlHogVariantUoctti, 3, 12, 4));
+	    Mat prediction = supervised_descent_model.predict(initial_alignment, Mat(), HogTransform(image, 0,VlHogVariant::VlHogVariantUoctti, 3, 12, 4));
 
         draw_landmarks(image, prediction, { 0, 0, 255 });
 
@@ -649,10 +668,6 @@ int main(int argc, char *argv[])
     }
 
 
-	// Save the learned model:
-	std::ofstream learned_model_file("landmark_regressor_ibug_5lms.bin", std::ios::binary);
-	cereal::BinaryOutputArchive output_archive(learned_model_file);
-	output_archive(supervised_descent_model);
 
 	return EXIT_SUCCESS;
 }
